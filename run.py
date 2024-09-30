@@ -38,9 +38,11 @@ def main(args):
     # Test BertModel
     bert_model = model.BertModel(bert_config, use_one_hot_embeddings=True)
     test_input = {
-        'input_ids': tf.constant([[31, 51, 99], [15, 5, 0]], dtype=tf.int32),
-        'input_mask': tf.constant([[1, 1, 1], [1, 1, 0]], dtype=tf.int32),
+        'input_ids': tf.constant([[0, 0, 99], [15, 5, 0]], dtype=tf.int32),
+        'input_mask': tf.constant([[0, 0, 1], [1, 1, 0]], dtype=tf.int32),
         'token_type_ids': tf.constant([[0, 0, 1], [0, 1, 0]], dtype=tf.int32),
+        'masked_lm_positions': tf.constant([[0, 1, 0], [2, 0, 0]], dtype=tf.int32),
+        'masked_lm_weights': tf.constant([[1, 1, 0], [1, 0, 0]], dtype=tf.int32)
     }
     res = bert_model(test_input)
     print(res.shape)

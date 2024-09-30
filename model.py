@@ -269,6 +269,18 @@ class BertTransformer(keras.layers.Layer):
         attention_output = self.attention(input_tensor, input_tensor, input_tensor, attention_mask=attention_mask)
         transformer_output = self.feed_forward(attention_output)
         return transformer_output
+    
+
+class BiasLayer(keras.layers.Layer):
+    def __init__(self, units):
+        super().__init__()
+        self.units = units
+
+    def build(self, input_shape):
+        self.bias = self.add_weight(shape=(self.units,), initializer='zeros', trainable=True, name='bias')
+
+    def call(self, inputs):
+        return inputs + self.bias
 
 
 class BertModel(keras.Model):
@@ -292,24 +304,48 @@ class BertModel(keras.Model):
             position_embedding_name="position_embeddings",
             dropout_prob=config.hidden_dropout_prob)
         
-        self.transformer = BertTransformer(
+        self.transformers = [BertTransformer(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
+            intermediate_size=config.intermediate_size,
+            intermediate_act_fn=get_activation(config.hidden_act),
+            hidden_drop_prob=config.hidden_dropout_prob,
             attention_probs_dropout_prob=config.attention_probs_dropout_prob,
             initializer_range=config.initializer_range
+        ) for _ in range(config.num_hidden_layers)]
+
+        self.dense = keras.layers.Dense(
+            config.hidden_size,
+            activation=get_activation(config.hidden_act),
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=config.initializer_range) # type: ignore
         )
+        
+        self.layer_norm = keras.layers.LayerNormalization()
+
+        self.bias_layer = BiasLayer(config.vocab_size)
 
     def call(self, inputs: dict):
         input_ids = inputs['input_ids']
         input_mask = inputs.get('input_mask', tf.ones_like(input_ids, dtype=tf.int32))
         token_type_ids = inputs.get('token_type_ids', tf.zeros_like(input_ids, dtype=tf.int32))
+        masked_lm_positions = inputs['masked_lm_positions']
+        masked_lm_weights = inputs['masked_lm_weights']
 
         embedding = self.embeddings(input_ids, token_type_ids=token_type_ids)
+        embedding_matrix = self.embeddings.get_embedding_tables()['word_embeddings']
 
         attention_mask = self._create_attention_mask_from_input_mask(input_ids, input_mask)
-        transformer_output = self.transformer(embedding, attention_mask)
+        for transformer in self.transformers:
+            transformer_output = transformer(embedding, attention_mask)
 
-        return transformer_output
+        final_output, mask_count = self._gather_indices(transformer_output, masked_lm_positions, masked_lm_weights)
+        final_output = self.dense(final_output)
+        final_output = self.layer_norm(final_output)
+        final_output = tf.matmul(final_output, embedding_matrix, transpose_b=True)
+        logits = self.bias_layer(final_output)
+        log_probs = tf.nn.log_softmax(logits, -1)
+
+        return tf.RaggedTensor.from_row_lengths(values=log_probs, row_lengths=mask_count)
     
     def _create_attention_mask_from_input_mask(self, from_tensor: tf.Tensor, to_mask: tf.Tensor):
         """Create 3D attention mask from a 2D tensor mask.
@@ -334,3 +370,54 @@ class BertModel(keras.Model):
         mask = broadcast_ones * to_mask
 
         return mask
+
+    def _gather_indices(self, sequence_tensor, positions, weight):
+        """Gathers the vectors at the specific positions over a minibatch."""
+        sequence_shape = tf.shape(sequence_tensor)
+        batch_size = sequence_shape[0] # type: ignore
+        seq_length = sequence_shape[1] # type: ignore
+        width = sequence_shape[2] # type: ignore
+
+        flat_offsets = tf.reshape(
+            tf.range(0, batch_size, dtype=tf.int32) * seq_length, [-1, 1])
+        flat_positions = positions + flat_offsets
+        flat_sequence_tensor = tf.reshape(sequence_tensor, [batch_size * seq_length, width])
+
+        target_position_indices = tf.where(weight > 0)
+        target_positions = tf.gather_nd(params=flat_positions, indices=target_position_indices)
+        output_tensor = tf.gather(params=flat_sequence_tensor, indices=target_positions)
+        mask_count = tf.reduce_sum(tf.cast(weight > 0, dtype=tf.int32), axis=-1)  # the num of masks per example
+        return output_tensor, mask_count
+    
+
+  
+def get_activation(activation_string):
+    """Maps a string to a Python function, e.g., "relu" => `tf.nn.relu`.
+
+    Args:
+        activation_string: String name of the activation function.
+
+    Returns:
+        A Python function corresponding to the activation function. If
+        `activation_string` is None, empty, or "linear", this will return None.
+        If `activation_string` is not a string, it will return `activation_string`.
+
+    Raises:
+        ValueError: The `activation_string` does not correspond to a known
+        activation.
+    """
+
+    if not activation_string:
+        return None
+
+    act = activation_string.lower()
+    if act == "linear":
+        return None
+    elif act == "relu":
+        return keras.activations.relu
+    elif act == "gelu":
+        return keras.activations.gelu
+    elif act == "tanh":
+        return keras.activations.tanh
+    else:
+        raise ValueError("Unsupported activation: %s" % act)
