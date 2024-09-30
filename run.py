@@ -44,6 +44,7 @@ def main(args):
     }
     res = bert_model(test_input)
     print(res.shape)
+    print(res)
 
 
 def get_argparser():

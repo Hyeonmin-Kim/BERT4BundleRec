@@ -179,7 +179,58 @@ class BertEmbedding(keras.layers.Layer):
             'token_type_embeddings': self.token_type_embedding_layer.embeddings if self.use_token_type else None,
             'position_embeddings': self.position_embedding_layer.embeddings if self.use_position_embeddings else None,
         }
+
+
+class BertSelfAttention(keras.layers.Layer):
+    def __init__(self,
+                 num_attention_heads=1,
+                 size_per_heads=512,
+                 attention_probs_dropout_prob=0.0, 
+                 initializer_range=0.02,
+                 hidden_dropout_prob=0.1):
+        super().__init__()
+        self.attention = keras.layers.MultiHeadAttention(
+            num_heads=num_attention_heads,
+            key_dim=size_per_heads,
+            dropout=attention_probs_dropout_prob,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
+            bias_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
+        )
+        self.dropout = keras.layers.Dropout(hidden_dropout_prob)
+        self.layer_norm = keras.layers.LayerNormalization()
+
+    def call(self, query: tf.Tensor, key: tf.Tensor, value: tf.Tensor, attention_mask: tf.Tensor):
+        attention_output = self.attention(query=query, key=key, value=value, attention_mask=attention_mask)
+        attention_output = self.dropout(attention_output)
+        attention_output = self.layer_norm(query + attention_output)
+        return attention_output
+
+class BertTransformer(keras.layers.Layer):
+    def __init__(self,
+                 hidden_size=768,
+                 num_hidden_layers=12,
+                 num_attention_heads=12,
+                 intermediate_size=3072,
+                 intermediate_act_fn=keras.activations.gelu,
+                 hidden_drop_prob=0.1,
+                 attention_probs_dropout_prob=0.1,
+                 initializer_range=0.02):
+        super().__init__()
         
+        assert hidden_size % num_attention_heads == 0, \
+            f"The hidden size {hidden_size} is not a multiple of the number of attention heads {num_attention_heads}."
+        attention_head_size = int(hidden_size / num_attention_heads)
+
+        self.attention = BertSelfAttention(
+            num_attention_heads=num_attention_heads,
+            size_per_heads=attention_head_size,
+            attention_probs_dropout_prob=attention_probs_dropout_prob,
+            initializer_range=initializer_range
+        )
+    
+    def call(self, input_tensor: tf.Tensor, attention_mask: tf.Tensor):
+        attention_output = self.attention(input_tensor, input_tensor, input_tensor, attention_mask=attention_mask)
+        return attention_output
 
 
 class BertModel(keras.Model):
@@ -202,10 +253,46 @@ class BertModel(keras.Model):
             token_type_embedding_name="token_type_embeddings",
             position_embedding_name="position_embeddings",
             dropout_prob=config.hidden_dropout_prob)
+        
+        self.transformer = BertTransformer(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            attention_probs_dropout_prob=config.attention_probs_dropout_prob,
+            initializer_range=config.initializer_range
+        )
 
     def call(self, inputs: dict, training=False):
         input_ids = inputs['input_ids']
         input_mask = inputs.get('input_mask', tf.ones_like(input_ids, dtype=tf.int32))
         token_type_ids = inputs.get('token_type_ids', tf.zeros_like(input_ids, dtype=tf.int32))
 
-        return self.embeddings(input_ids, token_type_ids=token_type_ids)
+        embedding = self.embeddings(input_ids, token_type_ids=token_type_ids)
+
+        attention_mask = self._create_attention_mask_from_input_mask(input_ids, input_mask)
+        transformer_output = self.transformer(embedding, attention_mask)
+
+        return transformer_output
+    
+    def _create_attention_mask_from_input_mask(self, from_tensor: tf.Tensor, to_mask: tf.Tensor):
+        """Create 3D attention mask from a 2D tensor mask.
+
+        Args:
+            from_tensor: 2D or 3D Tensor of shape [batch_size, from_seq_length, ...].
+            to_mask: int32 Tensor of shape [batch_size, to_seq_length].
+
+        Returns:
+            float Tensor of shape [batch_size, from_seq_length, to_seq_length].
+        """
+        from_shape = tf.shape(from_tensor)
+        batch_size, from_seq_length = from_shape[0], from_shape[1] # type: ignore
+        to_shape = tf.shape(to_mask)
+        to_seq_length = to_shape[1] # type: ignore
+
+        to_mask = tf.cast(
+            tf.reshape(to_mask, [batch_size, 1, to_seq_length]), dtype=tf.float32
+        ) # type: ignore
+
+        broadcast_ones = tf.ones(shape=[batch_size, from_seq_length, 1], dtype=tf.float32)
+        mask = broadcast_ones * to_mask
+
+        return mask
