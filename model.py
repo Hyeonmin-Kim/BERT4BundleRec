@@ -194,7 +194,6 @@ class BertSelfAttention(keras.layers.Layer):
             key_dim=size_per_heads,
             dropout=attention_probs_dropout_prob,
             kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
-            bias_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
         )
         self.dropout = keras.layers.Dropout(hidden_dropout_prob)
         self.layer_norm = keras.layers.LayerNormalization()
@@ -204,11 +203,40 @@ class BertSelfAttention(keras.layers.Layer):
         attention_output = self.dropout(attention_output)
         attention_output = self.layer_norm(query + attention_output)
         return attention_output
+    
+
+class BertFeedForward(keras.layers.Layer):
+    def __init__(self,
+                 intermediate_size=3072,
+                 hidden_size=768,
+                 intermediate_act_fn=keras.activations.gelu,
+                 hidden_drop_prob=0.1,
+                 initializer_range=0.02):
+        super().__init__()
+
+        self.dense1 = keras.layers.Dense(
+            intermediate_size, 
+            activation=intermediate_act_fn,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range) # type: ignore
+        )
+        self.dense2 = keras.layers.Dense(
+            hidden_size,
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range) # type: ignore
+        )
+        self.dropout = keras.layers.Dropout(hidden_drop_prob)
+        self.layer_norm = keras.layers.LayerNormalization()
+
+    def call(self, input_tensor: tf.Tensor):
+        intermediate_output = self.dense1(input_tensor)
+        layer_output = self.dense2(intermediate_output)
+        layer_output = self.dropout(layer_output)
+        layer_output = self.layer_norm(input_tensor + layer_output)
+        return layer_output
+
 
 class BertTransformer(keras.layers.Layer):
     def __init__(self,
                  hidden_size=768,
-                 num_hidden_layers=12,
                  num_attention_heads=12,
                  intermediate_size=3072,
                  intermediate_act_fn=keras.activations.gelu,
@@ -225,12 +253,22 @@ class BertTransformer(keras.layers.Layer):
             num_attention_heads=num_attention_heads,
             size_per_heads=attention_head_size,
             attention_probs_dropout_prob=attention_probs_dropout_prob,
+            initializer_range=initializer_range,
+            hidden_dropout_prob=hidden_drop_prob
+        )
+
+        self.feed_forward = BertFeedForward(
+            intermediate_size=intermediate_size,
+            hidden_size=hidden_size,
+            intermediate_act_fn=intermediate_act_fn,
+            hidden_drop_prob=hidden_drop_prob,
             initializer_range=initializer_range
         )
     
     def call(self, input_tensor: tf.Tensor, attention_mask: tf.Tensor):
         attention_output = self.attention(input_tensor, input_tensor, input_tensor, attention_mask=attention_mask)
-        return attention_output
+        transformer_output = self.feed_forward(attention_output)
+        return transformer_output
 
 
 class BertModel(keras.Model):
@@ -261,7 +299,7 @@ class BertModel(keras.Model):
             initializer_range=config.initializer_range
         )
 
-    def call(self, inputs: dict, training=False):
+    def call(self, inputs: dict):
         input_ids = inputs['input_ids']
         input_mask = inputs.get('input_mask', tf.ones_like(input_ids, dtype=tf.int32))
         token_type_ids = inputs.get('token_type_ids', tf.zeros_like(input_ids, dtype=tf.int32))
