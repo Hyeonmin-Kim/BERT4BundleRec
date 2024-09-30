@@ -1,0 +1,211 @@
+import copy
+import json
+from typing import Optional
+import six
+
+import tensorflow as tf
+import keras
+
+
+
+class BertConfig(object):
+    """Configuration for `BertModel`."""
+
+    def __init__(self,
+                 vocab_size,
+                 hidden_size=768,
+                 num_hidden_layers=12,
+                 num_attention_heads=12,
+                 intermediate_size=3072,
+                 hidden_act="gelu",
+                 hidden_dropout_prob=0.1,
+                 attention_probs_dropout_prob=0.1,
+                 max_position_embeddings=512,
+                 type_vocab_size=16,
+                 initializer_range=0.02):
+        """Constructs BertConfig.
+
+        Args:
+        vocab_size: Vocabulary size of `inputs_ids` in `BertModel`.
+        hidden_size: Size of the encoder layers and the pooler layer.
+        num_hidden_layers: Number of hidden layers in the Transformer encoder.
+        num_attention_heads: Number of attention heads for each attention layer in
+            the Transformer encoder.
+        intermediate_size: The size of the "intermediate" (i.e., feed-forward)
+            layer in the Transformer encoder.
+        hidden_act: The non-linear activation function (function or string) in the
+            encoder and pooler.
+        hidden_dropout_prob: The dropout probability for all fully connected
+            layers in the embeddings, encoder, and pooler.
+        attention_probs_dropout_prob: The dropout ratio for the attention
+            probabilities.
+        max_position_embeddings: The maximum sequence length that this model might
+            ever be used with. Typically set this to something large just in case
+            (e.g., 512 or 1024 or 2048).
+        type_vocab_size: The vocabulary size of the `token_type_ids` passed into
+            `BertModel`.
+        initializer_range: The stdev of the truncated_normal_initializer for
+            initializing all weight matrices.
+        """
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.hidden_act = hidden_act
+        self.intermediate_size = intermediate_size
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.max_position_embeddings = max_position_embeddings
+        self.type_vocab_size = type_vocab_size
+        self.initializer_range = initializer_range
+
+    @classmethod
+    def from_dict(cls, json_object):
+        """Constructs a `BertConfig` from a Python dictionary of parameters."""
+        config = BertConfig(vocab_size=None)
+        for (key, value) in six.iteritems(json_object):
+            config.__dict__[key] = value
+        return config
+
+    @classmethod
+    def from_json_file(cls, json_file):
+        """Constructs a `BertConfig` from a json file of parameters."""
+        with open(json_file, "r") as reader:
+            text = reader.read()
+        return cls.from_dict(json.loads(text))
+
+    def to_dict(self):
+        """Serializes this instance to a Python dictionary."""
+        output = copy.deepcopy(self.__dict__)
+        return output
+
+    def to_json_string(self):
+        """Serializes this instance to a JSON string."""
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+    
+
+class BertEmbedding(keras.layers.Layer):
+    def __init__(self,
+                 vocab_size,
+                 embedding_size=128,
+                 initializer_range=0.02,
+                 use_one_hot_embeddings=False,
+                 use_token_type=False,
+                 token_type_vocab_size=16,
+                 use_position_embeddings=True,
+                 max_position_embeddings=512,
+                 word_embedding_name="word_embeddings",
+                 token_type_embedding_name="token_type_embeddings",
+                 position_embedding_name="position_embeddings",
+                 dropout_prob=0.1):
+        super().__init__(name=word_embedding_name)
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
+        self.initializer_rage = initializer_range
+        self.use_one_hot_embeddings = use_one_hot_embeddings
+
+        self.word_embedding_layer = keras.layers.Embedding(
+            input_dim=self.vocab_size,
+            output_dim=self.embedding_size,
+            embeddings_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
+            name=word_embedding_name
+        )
+
+        self.use_token_type = use_token_type
+        self.token_type_vocab_size = token_type_vocab_size
+
+        if self.use_token_type:
+            self.token_type_embedding_layer = keras.layers.Embedding(
+                input_dim=self.token_type_vocab_size,
+                output_dim=self.embedding_size,
+                embeddings_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
+                name=token_type_embedding_name
+            )
+
+        self.use_position_embeddings = use_position_embeddings
+        self.max_position_embeddings = max_position_embeddings
+        
+        if self.use_position_embeddings:
+            self.position_embedding_layer = keras.layers.Embedding(
+                input_dim=self.max_position_embeddings,
+                output_dim=self.embedding_size,
+                embeddings_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range), # type: ignore
+                name=position_embedding_name
+            )
+
+        self.dropout_prob = dropout_prob
+        self.dropout = keras.layers.Dropout(rate=self.dropout_prob)
+
+        self.layernorm = keras.layers.LayerNormalization()
+
+    def build(self, input_shapes: tuple):
+        seq_length = input_shapes[1]
+        if self.use_one_hot_embeddings:
+            self.word_embedding_layer.build((None, seq_length))
+
+    def call(self, input_ids: tf.Tensor, token_type_ids: Optional[tf.Tensor] = None):
+        # The shape of input_ids are standardized to [batch, seqlen]
+        input_shape = input_ids.shape
+        batch_size, seq_length = input_shape[0], input_shape[1]
+
+        if self.use_one_hot_embeddings:
+            flat_input_ids = tf.reshape(input_ids, [-1])
+            one_hot_input_ids = tf.one_hot(flat_input_ids, depth=self.vocab_size)
+            embedding_table = self.word_embedding_layer.get_weights()[0]
+            output = tf.matmul(one_hot_input_ids, embedding_table)
+        else:
+            output = self.word_embedding_layer(input_ids)
+        output = tf.reshape(output, [batch_size, seq_length, self.embedding_size])
+
+        if self.use_token_type:
+            assert token_type_ids is not None, "token_type_ids` must be specified if `use_token_type` is True."
+            token_type_embedding = self.token_type_embedding_layer(token_type_ids)
+            output += token_type_embedding
+        
+        if self.use_position_embeddings:
+            assert seq_length <= self.max_position_embeddings  # type: ignore
+            position_ids = tf.range(seq_length, dtype=tf.int32)[tf.newaxis, :]
+            positional_embedding = self.position_embedding_layer(position_ids)
+            output += positional_embedding
+
+        output = self.layernorm(output)
+        output = self.dropout(output)
+
+        return output
+    
+    def get_embedding_tables(self):
+        return {
+            'word_embeddings': self.word_embedding_layer.embeddings,
+            'token_type_embeddings': self.token_type_embedding_layer.embeddings if self.use_token_type else None,
+            'position_embeddings': self.position_embedding_layer.embeddings if self.use_position_embeddings else None,
+        }
+        
+
+
+class BertModel(keras.Model):
+    def __init__(self, 
+                 config: BertConfig,
+                 use_one_hot_embeddings: bool = True):
+        super().__init__()
+        config = copy.deepcopy(config)
+
+        self.embeddings = BertEmbedding(
+            vocab_size=config.vocab_size,
+            embedding_size=config.hidden_size,
+            initializer_range=config.initializer_range,
+            use_one_hot_embeddings=use_one_hot_embeddings,
+            use_token_type=True,
+            token_type_vocab_size=config.type_vocab_size,
+            use_position_embeddings=True,
+            max_position_embeddings=config.max_position_embeddings,
+            word_embedding_name="word_embeddings",
+            token_type_embedding_name="token_type_embeddings",
+            position_embedding_name="position_embeddings",
+            dropout_prob=config.hidden_dropout_prob)
+
+    def call(self, inputs: dict, training=False):
+        input_ids = inputs['input_ids']
+        input_mask = inputs.get('input_mask', tf.ones_like(input_ids, dtype=tf.int32))
+        token_type_ids = inputs.get('token_type_ids', tf.zeros_like(input_ids, dtype=tf.int32))
+
+        return self.embeddings(input_ids, token_type_ids=token_type_ids)

@@ -6,8 +6,8 @@ dupe_factor=10
 max_predictions_per_seq=20
 max_seq_length=50
 signature="-mp${mask_prob}-sw${prop_sliding_window}-mlp${masked_lm_prob}-df${dupe_factor}-mppq${max_predictions_per_seq}-msl${max_seq_length}"
-CKPT_DIR="/path/BERT4Rec"
-dim=256
+CKPT_DIR="C:/Users/harry/Desktop/Hyunmin/2024-2/UROP/BERT4BundleRec/checkpoints"
+dim=64
 batch_size=256
 num_train_steps=800000
 

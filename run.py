@@ -1,6 +1,49 @@
 import argparse
-import sys
+import logging
+import os
+import pickle
 
+import tensorflow as tf
+
+import model
+
+
+logger = tf.get_logger()
+logger.setLevel(logging.DEBUG)
+
+
+def main(args):
+
+    # Manipulate arguments.
+    args.checkpointDir += args.signature
+    assert args.do_train or args.do_eval, "At least one of `do_train` or `do_eval` must be True."
+    bert_config = model.BertConfig.from_json_file(args.bert_config_file)
+
+    # Collect input file paths.
+    os.makedirs(os.path.join(os.getcwd(), args.checkpointDir), exist_ok=True)
+    train_input_filepaths = args.train_input_file.split(',')
+    test_input_filepaths = args.test_input_file.split(',') if args.test_input_file else train_input_filepaths
+    logger.info("*** train Input Files ***")
+    for input_file in train_input_filepaths:
+        logger.info(input_file)
+    logger.info("*** test Input Files ***")
+    for input_file in test_input_filepaths:
+        logger.info(input_file)
+
+    # Load vocab file.
+    with open(args.vocab_filename, 'rb') as vocab_file:
+        vocab = pickle.load(vocab_file)
+    item_size = len(vocab.counter)
+
+    # Test BertModel
+    bert_model = model.BertModel(bert_config, use_one_hot_embeddings=True)
+    test_input = {
+        'input_ids': tf.constant([[31, 51, 99], [15, 5, 0]], dtype=tf.int32),
+        'input_mask': tf.constant([[1, 1, 1], [1, 1, 0]], dtype=tf.int32),
+        'token_type_ids': tf.constant([[0, 0, 1], [0, 1, 0]], dtype=tf.int32),
+    }
+    res = bert_model(test_input)
+    print(res.shape)
 
 
 def get_argparser():
@@ -40,4 +83,4 @@ def get_argparser():
 if __name__ == "__main__":
     parser = get_argparser()
     args = parser.parse_args()
-    print(args)
+    main(args)
