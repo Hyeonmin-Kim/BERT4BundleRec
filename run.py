@@ -4,12 +4,76 @@ import os
 import pickle
 
 import tensorflow as tf
+import keras
 
 import model
+import optimizer
 
 
 logger = tf.get_logger()
 logger.setLevel(logging.DEBUG)
+
+
+def load_dataset(
+        train_input_filepaths: list[str], 
+        test_input_filepaths: list[str],
+        max_seq_length: int,
+        max_predictions_per_seq: int,
+        batch_size: int,
+        num_cpu_threads=4):
+    logger.info("*** train Input Files ***")
+    for input_file in train_input_filepaths:
+        logger.info(input_file)
+    logger.info("*** test Input Files ***")
+    for input_file in test_input_filepaths:
+        logger.info(input_file)
+
+    feature_description = {
+        'info': tf.io.FixedLenFeature([1], dtype=tf.int64),
+        'input_ids':  tf.io.FixedLenFeature([max_seq_length], dtype=tf.int64),
+        'input_mask':  tf.io.FixedLenFeature([max_seq_length], dtype=tf.int64),
+        'masked_lm_positions':  tf.io.FixedLenFeature([max_predictions_per_seq], dtype=tf.int64),
+        'masked_lm_ids': tf.io.FixedLenFeature([max_predictions_per_seq], dtype=tf.int64),
+        'masked_lm_weights':  tf.io.FixedLenFeature([max_predictions_per_seq], dtype=tf.float32)
+    }
+    def _parse_element_function(raw_example):
+        example = tf.io.parse_single_example(raw_example, feature_description)
+        inputs = {
+            'input_ids': tf.cast(example['input_ids'], dtype=tf.int32),
+            'input_mask': tf.cast(example['input_mask'], dtype=tf.int32),
+            'masked_lm_positions': tf.cast(example['masked_lm_positions'], dtype=tf.int32),
+            'masked_lm_weights': example['masked_lm_weights']
+        }
+        targets = {
+            'masked_lm_weights': inputs['masked_lm_weights'],
+            'masked_lm_ids': tf.cast(example['masked_lm_ids'], dtype=tf.int32)
+        }
+        return inputs, targets
+    
+    def _parse_batch_function(inputs, targets):
+        flattened_targets = tf.gather_nd(
+            params=targets['masked_lm_ids'],
+            indices=tf.where(targets['masked_lm_weights'] > 0)
+        )
+        # target_num = tf.reduce_sum(tf.cast(targets['masked_lm_weights'] > 0, dtype=tf.int32), axis=-1)
+        return inputs,flattened_targets
+    
+    train_dataset = tf.data.TFRecordDataset(train_input_filepaths)
+    train_dataset = train_dataset.map(_parse_element_function, num_parallel_calls=num_cpu_threads)
+    train_dataset = train_dataset.repeat()
+    train_dataset = train_dataset.shuffle(buffer_size=100)
+    train_dataset = train_dataset.batch(batch_size)
+    train_dataset = train_dataset.map(_parse_batch_function, num_parallel_calls=num_cpu_threads)
+    train_dataset = train_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    test_dataset = tf.data.TFRecordDataset(test_input_filepaths)
+    test_dataset = test_dataset.map(_parse_element_function, num_parallel_calls=num_cpu_threads)
+    test_dataset = test_dataset.batch(batch_size)
+    test_dataset = test_dataset.map(_parse_batch_function, num_parallel_calls=num_cpu_threads)
+    test_dataset = test_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    return train_dataset, test_dataset
+
 
 
 def main(args):
@@ -19,24 +83,44 @@ def main(args):
     assert args.do_train or args.do_eval, "At least one of `do_train` or `do_eval` must be True."
     bert_config = model.BertConfig.from_json_file(args.bert_config_file)
 
-    # Collect input file paths.
+    # Prepare Dataset
     os.makedirs(os.path.join(os.getcwd(), args.checkpointDir), exist_ok=True)
     train_input_filepaths = args.train_input_file.split(',')
     test_input_filepaths = args.test_input_file.split(',') if args.test_input_file else train_input_filepaths
-    logger.info("*** train Input Files ***")
-    for input_file in train_input_filepaths:
-        logger.info(input_file)
-    logger.info("*** test Input Files ***")
-    for input_file in test_input_filepaths:
-        logger.info(input_file)
+    train_dataset, test_dataset = load_dataset(
+        train_input_filepaths, test_input_filepaths, 
+        int(args.max_seq_length), int(args.max_predictions_per_seq), int(args.batch_size)
+    )
 
     # Load vocab file.
     with open(args.vocab_filename, 'rb') as vocab_file:
         vocab = pickle.load(vocab_file)
     item_size = len(vocab.counter)
 
-    # Test BertModel
+    # Configure Bert Model.
     bert_model = model.BertModel(bert_config, use_one_hot_embeddings=True)
+    bert_optimizer = optimizer.get_optimizer(
+        init_lr=float(args.learning_rate),
+        num_train_steps=int(args.num_train_steps),
+        num_warmup_steps=int(args.num_warmup_steps)
+    )
+    bert_loss = keras.losses.SparseCategoricalCrossentropy(
+        from_logits=False,
+        reduction='sum_over_batch_size'
+    )
+    bert_model.compile(
+        optimizer=bert_optimizer, # type: ignore
+        loss=bert_loss
+    )
+
+    return
+
+    # train
+    history = bert_model.fit(
+        train_dataset,
+
+    )
+    
     test_input = {
         'input_ids': tf.constant([[0, 0, 99], [15, 5, 0]], dtype=tf.int32),
         'input_mask': tf.constant([[0, 0, 1], [1, 1, 0]], dtype=tf.int32),

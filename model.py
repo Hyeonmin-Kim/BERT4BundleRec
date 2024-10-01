@@ -319,10 +319,9 @@ class BertModel(keras.Model):
             activation=get_activation(config.hidden_act),
             kernel_initializer=keras.initializers.TruncatedNormal(stddev=config.initializer_range) # type: ignore
         )
-        
         self.layer_norm = keras.layers.LayerNormalization()
-
         self.bias_layer = BiasLayer(config.vocab_size)
+        self.softmax = keras.layers.Softmax()
 
     def call(self, inputs: dict):
         input_ids = inputs['input_ids']
@@ -338,14 +337,14 @@ class BertModel(keras.Model):
         for transformer in self.transformers:
             transformer_output = transformer(embedding, attention_mask)
 
-        final_output, mask_count = self._gather_indices(transformer_output, masked_lm_positions, masked_lm_weights)
+        final_output, _ = self._gather_indices(transformer_output, masked_lm_positions, masked_lm_weights)
         final_output = self.dense(final_output)
         final_output = self.layer_norm(final_output)
         final_output = tf.matmul(final_output, embedding_matrix, transpose_b=True)
         logits = self.bias_layer(final_output)
-        log_probs = tf.nn.log_softmax(logits, -1)
+        prob = self.softmax(logits)
 
-        return tf.RaggedTensor.from_row_lengths(values=log_probs, row_lengths=mask_count)
+        return prob
     
     def _create_attention_mask_from_input_mask(self, from_tensor: tf.Tensor, to_mask: tf.Tensor):
         """Create 3D attention mask from a 2D tensor mask.

@@ -271,13 +271,13 @@ def create_instances_threading(all_documents, user, max_seq_length, short_seq_pr
                                masked_lm_prob, max_predictions_per_seq, vocab, rng,
                                mask_prob, step):
     cnt = 0
-    start_time = time.clock()
+    start_time = time.time()
     instances = []
     for user in all_documents:
         cnt += 1
         if cnt % 1000 == 0:
-            print(f"step: {step}, name: {multiprocessing.current_process().name}, step: {cnt}, time: {time.clock()-start_time}")
-            start_time = time.clock()
+            print(f"step: {step}, name: {multiprocessing.current_process().name}, step: {cnt}, time: {time.time()-start_time}")
+            start_time = time.time()
         instances.extend(create_instances_from_document_train(
             all_documents, user, max_seq_length, short_seq_prob,
             masked_lm_prob, max_predictions_per_seq, vocab, rng,
